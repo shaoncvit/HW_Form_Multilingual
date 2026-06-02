@@ -33,7 +33,7 @@ import random
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, List, Optional, Sequence, Tuple
-
+from pathlib import Path
 import torch
 from PIL import Image
 from torch.utils.data import Dataset
@@ -52,6 +52,15 @@ try:
 except Exception:
     LoraConfig = None
     get_peft_model = None
+
+
+os.environ["WANDB_DIR"] = "/ssd_scratch/shaon/wandb"
+os.environ["WANDB_CACHE_DIR"] = "/ssd_scratch/shaon/wandb_cache"
+os.environ["WANDB_CONFIG_DIR"] = "/ssd_scratch/shaon/wandb_config"
+
+Path(os.environ["WANDB_DIR"]).mkdir(parents=True, exist_ok=True)
+Path(os.environ["WANDB_CACHE_DIR"]).mkdir(parents=True, exist_ok=True)
+Path(os.environ["WANDB_CONFIG_DIR"]).mkdir(parents=True, exist_ok=True)
 
 
 IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".webp", ".bmp", ".tif", ".tiff"}
@@ -421,7 +430,7 @@ def parse_args():
     parser.add_argument("--warmup-steps", type=int, default=50)
     parser.add_argument("--logging-steps", type=int, default=20)
     parser.add_argument("--eval-steps", type=int, default=200)
-    parser.add_argument("--save-steps", type=int, default=500)
+    parser.add_argument("--save-steps", type=int, default=200)
     parser.add_argument("--save-total-limit", type=int, default=2)
 
     parser.add_argument("--freeze-vision-encoder", action="store_true")
@@ -438,11 +447,19 @@ def parse_args():
     parser.add_argument("--skip-generation-eval", action="store_true")
     parser.add_argument("--resume-from-checkpoint", type=str, default=None)
 
+    # Logging. Use --report-to wandb to enable Weights & Biases.
+    parser.add_argument("--report-to", type=str, default="none", choices=["none", "wandb"])
+    parser.add_argument("--wandb-project", type=str, default="lightonocr-forms")
+    parser.add_argument("--run-name", type=str, default=None)
+
     return parser.parse_args()
 
 
 def main():
     args = parse_args()
+
+    if args.report_to == "wandb":
+        os.environ.setdefault("WANDB_PROJECT", args.wandb_project)
 
     if args.manifest is None and args.data_root is None:
         raise ValueError("Provide either --data-root or --manifest")
@@ -510,7 +527,8 @@ def main():
         optim="adamw_torch_fused" if torch.cuda.is_available() else "adamw_torch",
         warmup_steps=args.warmup_steps,
         lr_scheduler_type="linear",
-        report_to="none",
+        report_to=args.report_to,
+        run_name=args.run_name,
     )
 
     trainer = Trainer(
