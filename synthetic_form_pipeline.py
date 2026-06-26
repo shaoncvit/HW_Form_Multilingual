@@ -200,13 +200,16 @@ class FieldBox:
     value_bbox: Optional[List[int]]
 
     def as_dict(self) -> Dict[str, Any]:
+        # Simple annotation format:
+        # key   = visible field label/content on the form
+        # value = written/generated answer content
         return {
-            "key": self.key,
-            "label": self.label,
+            "field_id": self.key,
+            "key": self.label,
+            "bbox_key": self.label_bbox,
             "value": self.value,
+            "bbox_value": self.value_bbox,
             "style": self.style,
-            "label_bbox": self.label_bbox,
-            "value_bbox": self.value_bbox,
         }
 
 
@@ -1074,6 +1077,404 @@ def layout_prescription_sheet(draw: ImageDraw.ImageDraw, renderer: LayoutRendere
     renderer.draw_signature_line(draw, right - 460, h - 215, "signature", record.get("signature", record.get("name", "Signature")), 390)
 
 
+
+
+# -----------------------------
+# Additional mixed document-style layouts
+# These mimic forms that contain instructions, paragraphs, tables, boxed character cells,
+# receipt blocks, and footer statements, not only simple key-value fields.
+# -----------------------------
+
+def _combined_bbox(boxes: List[Optional[List[int]]]) -> Optional[List[int]]:
+    good = [b for b in boxes if b]
+    if not good:
+        return None
+    return [min(b[0] for b in good), min(b[1] for b in good), max(b[2] for b in good), max(b[3] for b in good)]
+
+
+def _wrap_text_to_width(draw: ImageDraw.ImageDraw, text: str, font: ImageFont.FreeTypeFont, max_width: int) -> List[str]:
+    words = str(text).split()
+    if not words:
+        return [""]
+    lines_out: List[str] = []
+    current = words[0]
+    for word in words[1:]:
+        trial = current + " " + word
+        if draw.textbbox((0, 0), trial, font=font)[2] <= max_width:
+            current = trial
+        else:
+            lines_out.append(current)
+            current = word
+    lines_out.append(current)
+    return lines_out
+
+
+def _draw_wrapped_text(draw: ImageDraw.ImageDraw, xy: Tuple[int, int], text: str, font: ImageFont.FreeTypeFont,
+                       fill: Tuple[int, int, int], max_width: int, line_gap: int = 8,
+                       max_lines: Optional[int] = None) -> List[int]:
+    x, y = xy
+    boxes = []
+    lines_out = _wrap_text_to_width(draw, text, font, max_width)
+    if max_lines is not None:
+        lines_out = lines_out[:max_lines]
+    line_h = draw.textbbox((0, 0), "Ag", font=font)[3] + line_gap
+    for i, line_text in enumerate(lines_out):
+        boxes.append(draw_text(draw, (x, y + i * line_h), line_text, font, fill))
+    return _combined_bbox(boxes) or [x, y, x, y]
+
+
+def _add_text_block(renderer: LayoutRenderer, key: str, value: str, bbox: List[int], style: str = "printed_text_block") -> None:
+    renderer.fields.append(FieldBox(key=key, label=key.replace("_", " ").title(), value=str(value), style=style,
+                                    label_bbox=None, value_bbox=bbox))
+
+
+def _draw_char_boxes(draw: ImageDraw.ImageDraw, renderer: LayoutRenderer, x: int, y: int, key: str, value: str,
+                     n_cells: int = 18, cell_w: int = 30, cell_h: int = 34, label: Optional[str] = None,
+                     fill_first: bool = True) -> int:
+    label_text = label or renderer.label(key)
+    label_bbox = draw_text(draw, (x, y + 5), label_text, renderer.fonts.small, (20, 20, 20))
+    sx = x + 210
+    for i in range(n_cells):
+        rectangle(draw, (sx + i * cell_w, y, sx + (i + 1) * cell_w, y + cell_h), width=1, fill=(80, 80, 80))
+    val = str(value)[:n_cells]
+    value_boxes = []
+    if fill_first:
+        for i, ch in enumerate(val):
+            value_boxes.append(draw_text(draw, (sx + i * cell_w + 7, y + 1 + random.randint(-2, 2)), ch, renderer.fonts.handwritten_small, renderer.ink))
+    renderer.add_field(key, value, "character_boxes", label_bbox, _combined_bbox(value_boxes) or [sx, y, sx + len(val) * cell_w, y + cell_h])
+    return y + cell_h + 18
+
+
+def _paragraph_text(family: str, record: Dict[str, str]) -> str:
+    name = record.get("name", "the applicant")
+    if family in {"hospital", "prescription"}:
+        return f"The patient {name} was examined and the details below were recorded for treatment, consultation and follow-up advice. Please verify the written entries before submission."
+    if family in {"bank", "tax"}:
+        return f"I request the institution to update the details given below. I confirm that the information supplied in this form is correct to the best of my knowledge."
+    if family in {"school", "university"}:
+        return f"This application is submitted for registration and record verification. The applicant should ensure that all particulars, course details and contact information are correct."
+    return f"This form records the submitted information for {name}. The written portions must be checked and signed by the applicant."
+
+
+def layout_letter_declaration(draw: ImageDraw.ImageDraw, renderer: LayoutRenderer, record: Dict[str, str], family: str) -> None:
+    """Letter/application style: heading + paragraphs + contact table + footer text."""
+    w, h = FORM_SIZE
+    left, right = 95, w - 95
+    title = random.choice(["APPLICATION STATEMENT", "DECLARATION FORM", "REGISTRATION AND CONTACT UPDATE", title_for(renderer.language, family).upper()])
+    draw_text(draw, (w // 2 - 260, 55), title, renderer.fonts.title, (20, 20, 20))
+    subtitle = "Please read the instruction carefully before filling this document."
+    sb = _draw_wrapped_text(draw, (left, 115), subtitle, renderer.fonts.small, (25, 25, 25), right-left)
+    _add_text_block(renderer, "instruction_line", subtitle, sb)
+    line(draw, [(left, 155), (right, 155)], width=2)
+
+    para1 = _paragraph_text(family, record)
+    para2 = "The applicant agrees that the entries may be used for internal verification, record keeping, and document processing. Incomplete information may delay processing."
+    b1 = _draw_wrapped_text(draw, (left, 190), para1, renderer.fonts.small, (30, 30, 30), right-left, max_lines=4)
+    b2 = _draw_wrapped_text(draw, (left, 275), para2, renderer.fonts.small, (30, 30, 30), right-left, max_lines=4)
+    _add_text_block(renderer, "paragraph_1", para1, b1)
+    _add_text_block(renderer, "paragraph_2", para2, b2)
+
+    # Contact table, inspired by a filled list/table application.
+    table_top = 390
+    table = (left, table_top, right, table_top + 720)
+    rectangle(draw, table, width=2)
+    cols = [left, left + 90, left + 440, left + 850, left + 1130, right]
+    for x in cols[1:-1]:
+        line(draw, [(x, table[1]), (x, table[3])], width=1)
+    header_h = 52
+    line(draw, [(left, table[1] + header_h), (right, table[1] + header_h)], width=1)
+    headers = ["No.", "Applicant / Contact", "Address / Details", "Phone", "Email / Note"]
+    for i, hd in enumerate(headers):
+        draw_text(draw, (cols[i] + 10, table[1] + 14), hd, renderer.fonts.small, (20, 20, 20))
+    row_h = 98
+    keys = ["name", "address", "phone", "email", "remarks"]
+    for r in range(6):
+        y = table[1] + header_h + r * row_h
+        line(draw, [(left, y + row_h), (right, y + row_h)], width=1)
+        draw_text(draw, (cols[0] + 18, y + 30), str(r + 1), renderer.fonts.small, (20, 20, 20))
+        vals = [record.get("name", ""), record.get("address", ""), record.get("phone", ""), record.get("email", ""), record.get("remarks", "")]
+        if r > 0:
+            vals = [random.choice([record.get("guardian_name", ""), record.get("father_name", ""), record.get("doctor_name", ""), ""]),
+                    random.choice([record.get("city", ""), record.get("district", ""), record.get("branch", ""), ""]),
+                    "9" + rand_digits(9), "", random.choice(["verified", "copy attached", "pending", ""])]
+        for ci, val in enumerate(vals[:4], start=1):
+            if not val:
+                continue
+            vb = renderer._draw_handwritten_in_region(draw, (cols[ci] + 8, y + 8, cols[ci + 1] - 8, y + row_h - 8), val, renderer.fonts.handwritten_small, angle_range=(-4, 4), center_bias=0.05)
+            renderer.add_field(f"letter_table_{r}_{ci}", val, "letter_table_cell", None, vb)
+
+    footer_y = table[3] + 55
+    footer = "I hereby declare that the information given above is true and complete. I understand that false information may result in cancellation of the application."
+    fb = _draw_wrapped_text(draw, (left, footer_y), footer, renderer.fonts.small, (25, 25, 25), right-left, max_lines=4)
+    _add_text_block(renderer, "footer_declaration", footer, fb)
+    renderer.draw_inline(draw, left, h - 210, "date", record.get("date", random_date(2024, 2026)), 420, label_width=110)
+    renderer.draw_signature_line(draw, right - 480, h - 235, "signature", record.get("signature", record.get("name", "Signature")), 410)
+
+
+def layout_portal_grid_registration(draw: ImageDraw.ImageDraw, renderer: LayoutRenderer, record: Dict[str, str], family: str) -> None:
+    """Box-per-character registration form with many checkboxes."""
+    w, h = FORM_SIZE
+    left, right = 80, w - 80
+    draw_text(draw, (w // 2 - 250, 45), "PORTAL REGISTRATION FORM", renderer.fonts.title, (20, 20, 20))
+    draw_text(draw, (w // 2 - 255, 92), "Kindly fill in CAPITAL LETTERS. All fields marked * are mandatory.", renderer.fonts.small, (30, 30, 30))
+    photo_box = (right - 160, 35, right, 185)
+    rectangle(draw, photo_box, width=2)
+    draw_text(draw, (photo_box[0] + 14, photo_box[1] + 45), "Affix recent\nphotograph", renderer.fonts.small, (40, 40, 40))
+    rectangle(draw, (left, 210, right, h - 90), width=2)
+
+    y = 245
+    draw_text(draw, (left + 20, y), "I. Personal Details*", renderer.fonts.subtitle, (20, 20, 20))
+    y += 48
+    y = _draw_char_boxes(draw, renderer, left + 25, y, "name", record.get("name", ""), n_cells=28, cell_w=31)
+    y = _draw_char_boxes(draw, renderer, left + 25, y, "father_name", record.get("father_name", record.get("guardian_name", "")), n_cells=28, cell_w=31)
+    y = _draw_char_boxes(draw, renderer, left + 25, y, "dob", record.get("dob", ""), n_cells=10, cell_w=34)
+    y = _draw_char_boxes(draw, renderer, left + 25, y, "phone", record.get("phone", ""), n_cells=12, cell_w=34)
+    y = _draw_char_boxes(draw, renderer, left + 25, y, "email", record.get("email", ""), n_cells=32, cell_w=27)
+    y = _draw_char_boxes(draw, renderer, left + 25, y, "address", record.get("address", ""), n_cells=38, cell_w=25)
+
+    y += 10
+    renderer.draw_checkbox(draw, left + 25, y, "gender", record.get("gender", "Male"), ["Male", "Female", "Other"])
+    y += 62
+    renderer.draw_checkbox(draw, left + 25, y, "marital_status", record.get("marital_status", "Single"), ["Single", "Married", "Other"])
+    y += 62
+    renderer.draw_checkbox(draw, left + 25, y, "course", record.get("course", "Arts"), ["Science", "Commerce", "Arts", "Other"])
+    y += 85
+    draw_text(draw, (left + 20, y), "II. Academic / Other Details*", renderer.fonts.subtitle, (20, 20, 20))
+    y += 45
+    y = _draw_char_boxes(draw, renderer, left + 25, y, "roll_no", record.get("roll_no", ""), n_cells=14, cell_w=32)
+    y = _draw_char_boxes(draw, renderer, left + 25, y, "registration_no", record.get("registration_no", ""), n_cells=22, cell_w=29)
+    renderer.draw_inline(draw, left + 25, y + 10, "remarks", record.get("remarks", ""), right - left - 80, label_width=170)
+
+
+def layout_medical_bill_receipt(draw: ImageDraw.ImageDraw, renderer: LayoutRenderer, record: Dict[str, str], family: str) -> None:
+    """Two-block receipt/document with sparse key-values and official text."""
+    w, h = FORM_SIZE
+    left, right = 150, w - 150
+    draw_text(draw, (w // 2 - 185, 70), "MEDICAL BILL RECEIPT", renderer.fonts.title, (20, 20, 20))
+    renderer.draw_inline(draw, right - 470, 140, "claim_no", record.get("claim_no", f"#{random.randint(10000,99999)}"), 430, label_width=190)
+    renderer.draw_inline(draw, right - 470, 195, "date", record.get("date", random_date(2024, 2026)), 430, label_width=190)
+
+    y = 300
+    draw_text(draw, (left, y), "Name of Medical Institution:", renderer.fonts.small, (25, 25, 25))
+    renderer.draw_inline(draw, left + 360, y - 8, "branch", record.get("branch", "Clinic One"), 600, label_width=0)
+    y += 60
+    for key in ["doctor_name", "address", "phone"]:
+        y = renderer.draw_inline(draw, left, y, key, record.get(key, ""), right - left, label_width=260)
+
+    y += 55
+    draw_text(draw, (left, y), "Patient Information", renderer.fonts.subtitle, (20, 20, 20))
+    y += 48
+    for key in ["name", "address", "city", "pin_code"]:
+        y = renderer.draw_inline(draw, left, y, key, record.get(key, ""), right - left, label_width=210)
+
+    # lower official receipt block
+    y = 1030
+    line(draw, [(left, y), (right, y)], width=2)
+    y += 55
+    draw_text(draw, (left, y), "OFFICIAL RECEIPT", renderer.fonts.subtitle, (20, 20, 20))
+    draw_text(draw, (right - 330, y), "KLINIK ABC", renderer.fonts.subtitle, (20, 20, 20))
+    y += 120
+    y = renderer.draw_inline(draw, left, y, "name", record.get("name", ""), right - left, label_width=300)
+    y = renderer.draw_inline(draw, left, y, "amount", record.get("amount", ""), right - left, label_width=300)
+    y = renderer.draw_inline(draw, left, y, "remarks", record.get("remarks", "Medicine and consultation"), right - left, label_width=300)
+    y = renderer.draw_inline(draw, left, y, "date", record.get("date", random_date(2024, 2026)), 520, label_width=160)
+    renderer.draw_signature_line(draw, right - 430, h - 260, "signature", record.get("signature", record.get("name", "Signature")), 350)
+
+
+def layout_kyc_update_grid(draw: ImageDraw.ImageDraw, renderer: LayoutRenderer, record: Dict[str, str], family: str) -> None:
+    """KYC/account update: dense cell grids, option ticks, photo area, declaration footer."""
+    w, h = FORM_SIZE
+    left, right = 85, w - 85
+    draw_text(draw, (w // 2 - 235, 45), "KYC DETAILS UPDATION FORM", renderer.fonts.title, (20, 20, 20))
+    draw_text(draw, (w // 2 - 150, 90), "STATE BANK OF INDIA", renderer.fonts.subtitle, (20, 20, 20))
+    rectangle(draw, (right - 185, 55, right - 15, 215), width=2)
+    draw_text(draw, (right - 160, 105), "Photo", renderer.fonts.small, (50, 50, 50))
+
+    y = 160
+    y = _draw_char_boxes(draw, renderer, left, y, "account_no", record.get("account_no", rand_digits(11)), n_cells=18, cell_w=30)
+    draw_text(draw, (left, y + 5), "1. PERSONAL DETAILS", renderer.fonts.subtitle, (20, 20, 20))
+    y += 45
+    for key, cells in [("name", 32), ("father_name", 32), ("dob", 10), ("pan", 14), ("phone", 12)]:
+        y = _draw_char_boxes(draw, renderer, left + 15, y, key, record.get(key, ""), n_cells=cells, cell_w=29)
+    renderer.draw_checkbox(draw, left + 15, y, "occupation", record.get("occupation", "Student"), ["Student", "Service", "Business", "Professional", "Retired"])
+    y += 70
+    draw_text(draw, (left, y), "2. IDENTIFICATION INFORMATION", renderer.fonts.subtitle, (20, 20, 20))
+    y += 45
+    y = _draw_char_boxes(draw, renderer, left + 15, y, "registration_no", record.get("registration_no", f"ID{rand_digits(8)}"), n_cells=24, cell_w=28)
+    renderer.draw_checkbox(draw, left + 15, y, "passport_type", record.get("passport_type", "Fresh"), ["PAN", "Voter ID", "Driving Licence", "Passport", "Aadhaar"])
+    y += 75
+    draw_text(draw, (left, y), "3. CURRENT / PERMANENT ADDRESS DETAILS", renderer.fonts.subtitle, (20, 20, 20))
+    y += 45
+    for key, cells in [("address", 38), ("city", 18), ("district", 18), ("pin_code", 8), ("email", 32)]:
+        y = _draw_char_boxes(draw, renderer, left + 15, y, key, record.get(key, ""), n_cells=cells, cell_w=27)
+    y += 30
+    declaration = "I hereby declare that the information furnished above is true and correct. I undertake to inform the bank of any change in the information provided above."
+    db = _draw_wrapped_text(draw, (left, y), declaration, renderer.fonts.small, (25, 25, 25), right-left, max_lines=4)
+    _add_text_block(renderer, "applicant_declaration", declaration, db)
+    renderer.draw_signature_line(draw, right - 460, h - 220, "signature", record.get("signature", record.get("name", "Signature")), 390)
+
+
+def layout_handwriting_sample_form(draw: ImageDraw.ImageDraw, renderer: LayoutRenderer, record: Dict[str, str], family: str) -> None:
+    """Handwriting-sample style: number boxes, alphabet line, and paragraph copy block."""
+    w, h = FORM_SIZE
+    left, right = 80, w - 80
+    draw_text(draw, (w // 2 - 230, 45), "HANDWRITING SAMPLE FORM", renderer.fonts.title, (20, 20, 20))
+    y = 120
+    renderer.draw_inline(draw, left, y, "name", record.get("name", ""), 520, label_width=110)
+    renderer.draw_inline(draw, left + 600, y, "date", record.get("date", random_date(2024, 2026)), 280, label_width=100)
+    renderer.draw_inline(draw, left + 930, y, "city", record.get("city", ""), 360, label_width=80)
+    y += 95
+    instruction = "This sample of handwriting is collected for recognizing handwritten numbers and letters. Please write the characters inside the boxes below."
+    ib = _draw_wrapped_text(draw, (left, y), instruction, renderer.fonts.small, (20, 20, 20), right-left, max_lines=3)
+    _add_text_block(renderer, "handwriting_instruction", instruction, ib)
+    y += 90
+
+    # repeated number boxes
+    for row in range(6):
+        x = left
+        for col in range(4):
+            bw = random.choice([160, 190, 230, 280])
+            bh = 58
+            if x + bw > right:
+                break
+            rectangle(draw, (x, y, x + bw, y + bh), width=2)
+            val = rand_digits(random.randint(2, 7))
+            vb = renderer._draw_handwritten_in_region(draw, (x + 8, y + 6, x + bw - 8, y + bh - 8), val, renderer.fonts.handwritten, angle_range=(-5, 5), center_bias=0.2)
+            renderer.add_field(f"number_sample_{row}_{col}", val, "handwriting_number_box", None, vb)
+            draw_text(draw, (x + 8, y - 22), str(random.randint(10, 999999)), renderer.fonts.small, (20, 20, 20))
+            x += bw + random.randint(45, 80)
+        y += 90
+
+    for label, chars in [("lowercase_letters", "abcdefghijklmnopqrstuvwxyz"), ("uppercase_letters", "ABCDEFGHIJKLMNOPQRSTUVWXYZ")]:
+        draw_text(draw, (left, y), chars, renderer.fonts.small, (20, 20, 20))
+        y += 30
+        rectangle(draw, (left, y, right, y + 64), width=2)
+        val = chars
+        vb = renderer._draw_handwritten_in_region(draw, (left + 8, y + 6, right - 8, y + 58), val, renderer.fonts.handwritten_small, angle_range=(-3, 3), center_bias=0.05)
+        renderer.add_field(label, val, "handwriting_alphabet_box", None, vb)
+        y += 95
+
+    paragraph = "I confirm that this handwriting sample has been written by me. The information given in this form is correct and complete."
+    pb = _draw_wrapped_text(draw, (left, y), "Please copy the following text in the box below:", renderer.fonts.small, (20, 20, 20), right-left)
+    _add_text_block(renderer, "copy_instruction", "Please copy the following text in the box below:", pb)
+    y += 45
+    rectangle(draw, (left, y, right, h - 160), width=2)
+    vb = _draw_wrapped_text(draw, (left + 16, y + 18), paragraph, renderer.fonts.handwritten, renderer.ink, right - left - 32, line_gap=12, max_lines=7)
+    renderer.add_field("copy_paragraph", paragraph, "handwriting_paragraph_box", None, vb)
+
+
+def layout_pre_enrollment_application(draw: ImageDraw.ImageDraw, renderer: LayoutRenderer, record: Dict[str, str], family: str) -> None:
+    """Old pre-enrolment style with dotted sections, narrative footer and signature."""
+    w, h = FORM_SIZE
+    left, right = 95, w - 95
+    draw_text(draw, (left, 55), "PRE-ENROLMENT FORM", renderer.fonts.title, (20, 20, 20))
+    draw_text(draw, (right - 170, 60), str(random.randint(1995, 2026)), renderer.fonts.subtitle, (20, 20, 20))
+    line(draw, [(left, 110), (right, 110)], width=2)
+    y = 150
+    rows = [
+        ("name", "FAMILY NAME / GIVEN NAME"), ("father_name", "FATHER'S NAME"), ("mother_name", "MOTHER'S NAME"),
+        ("dob", "DATE OF BIRTH"), ("nationality", "NATIONALITY"), ("address", "ADDRESS / RESIDENCE"),
+        ("course", "PROPOSED COURSE"), ("occupation", "PRESENT JOB / PROFESSION"), ("remarks", "ANY OTHER INFORMATION"),
+    ]
+    for key, label in rows:
+        if key == "address":
+            box_h = 110
+        else:
+            box_h = 58
+        rectangle(draw, (left, y, right, y + box_h), width=1)
+        line(draw, [(left + 360, y), (left + 360, y + box_h)], width=1)
+        label_bbox = draw_text(draw, (left + 12, y + 15), label, renderer.fonts.small, (20, 20, 20))
+        val = record.get(key, "")
+        vb = renderer._draw_handwritten_in_region(draw, (left + 380, y + 8, right - 12, y + box_h - 8), val, renderer.fonts.handwritten_small, angle_range=(-4, 4), center_bias=0.05)
+        renderer.add_field(key, val, "pre_enrollment_row", label_bbox, vb)
+        y += box_h + 12
+    y += 30
+    statement = "I hereby declare that the information given in this pre-enrolment form is true to my best knowledge. I am willing to accept an offer of place for the above course after receiving general information and prospectus."
+    sb = _draw_wrapped_text(draw, (left, y), statement, renderer.fonts.small, (25, 25, 25), right-left, max_lines=5)
+    _add_text_block(renderer, "pre_enrolment_statement", statement, sb)
+    renderer.draw_inline(draw, left, h - 220, "date", record.get("date", random_date(2024, 2026)), 420, label_width=110)
+    renderer.draw_signature_line(draw, right - 500, h - 245, "signature", record.get("signature", record.get("name", "Signature")), 430)
+
+
+def layout_prehospital_report(draw: ImageDraw.ImageDraw, renderer: LayoutRenderer, record: Dict[str, str], family: str) -> None:
+    """Very dense emergency/pre-hospital report with shaded section headers."""
+    w, h = FORM_SIZE
+    left, right = 60, w - 60
+    draw_text(draw, (w // 2 - 230, 35), "PREHOSPITAL CARE REPORT", renderer.fonts.title, (20, 20, 20))
+    y = 90
+    # top grid
+    top = (left, y, right, y + 210)
+    rectangle(draw, top, width=2)
+    mid = left + (right-left)//2
+    line(draw, [(mid, y), (mid, y + 210)], width=1)
+    small_rows = [("patient_id", "Case No."), ("name", "Patient Name"), ("date", "Date"), ("time", "Time"), ("phone", "Phone")]
+    yy = y + 12
+    for key, lab in small_rows:
+        renderer.draw_inline(draw, left + 15, yy, key, record.get(key, ""), mid-left-35, label_width=145, line_height=30)
+        yy += 38
+    yy = y + 12
+    for key, lab in [("age", "Age"), ("gender", "Gender"), ("address", "Address"), ("doctor_name", "Attendant"), ("bed_no", "Unit")]:
+        renderer.draw_inline(draw, mid + 15, yy, key, record.get(key, ""), right-mid-35, label_width=145, line_height=30)
+        yy += 38
+    y = top[3] + 25
+
+    # checkbox rows
+    for section, options, selected_key in [
+        ("MEDICAL HISTORY", ["Diabetes", "Hypertension", "Asthma", "None", "Other"], "past_history"),
+        ("PATIENT CONDITION", ["Stable", "Critical", "Unconscious", "Pain", "Breathless"], "remarks"),
+        ("TREATMENT GIVEN", ["Oxygen", "IV Fluids", "Dressing", "Medication", "Transport"], "plan_of_care"),
+    ]:
+        draw.rectangle((left, y, right, y + 36), fill=(200, 200, 200), outline=(60, 60, 60), width=1)
+        draw_text(draw, (left + 10, y + 8), section, renderer.fonts.small, (15, 15, 15))
+        y += 48
+        # draw options manually in compact rows
+        x = left + 15
+        for opt in options:
+            b = (x, y, x + 24, y + 24)
+            rectangle(draw, b, width=1)
+            if random.random() < 0.35:
+                renderer._mark_option(draw, b)
+                renderer.add_field(f"{section.lower().replace(' ', '_')}_{opt.lower()}", opt, "prehospital_checkbox", None, [b[0], b[1], b[2], b[3]])
+            draw_text(draw, (x + 34, y - 2), opt, renderer.fonts.small, (20, 20, 20))
+            x += 230
+        y += 55
+
+    # vitals table
+    table = (left, y, right, y + 340)
+    rectangle(draw, table, width=2)
+    draw.rectangle((left, y, right, y + 42), fill=(205, 205, 205), outline=(60, 60, 60), width=1)
+    draw_text(draw, (left + 10, y + 10), "VITAL SIGNS / ASSESSMENT", renderer.fonts.small, (10, 10, 10))
+    cols = [left, left + 155, left + 315, left + 475, left + 640, left + 805, left + 980, right]
+    for x in cols[1:-1]:
+        line(draw, [(x, y + 42), (x, table[3])], width=1)
+    row_y = y + 42
+    headers = ["Time", "BP", "HR", "RR", "SPO2", "Temp", "GRBS"]
+    for i, hd in enumerate(headers):
+        draw_text(draw, (cols[i] + 8, row_y + 12), hd, renderer.fonts.small, (20, 20, 20))
+    row_y += 48
+    vals = [record.get("time", ""), record.get("bp", ""), record.get("hr", ""), record.get("rr", ""), record.get("spo2", ""), record.get("temperature", ""), record.get("grbs", "")]
+    for r in range(4):
+        line(draw, [(left, row_y + 58), (right, row_y + 58)], width=1)
+        for i, val in enumerate(vals if r == 0 else ["", "", "", "", "", "", ""]):
+            if val:
+                vb = draw_text(draw, (cols[i] + 8, row_y + 8), val, renderer.fonts.handwritten_small, renderer.ink)
+                renderer.add_field(f"prehospital_vital_{r}_{i}", val, "prehospital_vitals", None, vb)
+        row_y += 58
+    y = table[3] + 30
+    # narrative area
+    left_box = (left, y, left + 660, h - 235)
+    right_box = (left + 690, y, right, h - 235)
+    rectangle(draw, left_box, width=2)
+    rectangle(draw, right_box, width=2)
+    draw_text(draw, (left_box[0] + 10, left_box[1] + 8), "Narrative / Chief Complaint", renderer.fonts.small, (20, 20, 20))
+    draw_text(draw, (right_box[0] + 10, right_box[1] + 8), "Treatment / Transport Notes", renderer.fonts.small, (20, 20, 20))
+    for key, box in [("chief_complaints", left_box), ("plan_of_care", right_box)]:
+        val = record.get(key, "")
+        vb = _draw_wrapped_text(draw, (box[0] + 16, box[1] + 50), val, renderer.fonts.handwritten_small, renderer.ink, box[2] - box[0] - 32, max_lines=6)
+        renderer.add_field(key, val, "prehospital_narrative", None, vb)
+    renderer.draw_signature_line(draw, right - 500, h - 200, "signature", record.get("signature", record.get("name", "Signature")), 420)
+
+
 LAYOUT_FUNCTIONS = {
     "ta_reporting": layout_ta_reporting,
     "membership": layout_membership,
@@ -1082,6 +1483,13 @@ LAYOUT_FUNCTIONS = {
     "admission_marks": layout_admission_with_marks,
     "dense_office": layout_dense_office_form,
     "prescription_sheet": layout_prescription_sheet,
+    "letter_declaration": layout_letter_declaration,
+    "portal_grid": layout_portal_grid_registration,
+    "medical_receipt": layout_medical_bill_receipt,
+    "kyc_grid": layout_kyc_update_grid,
+    "handwriting_sample": layout_handwriting_sample_form,
+    "pre_enrollment": layout_pre_enrollment_application,
+    "prehospital_report": layout_prehospital_report,
 }
 
 
@@ -1525,13 +1933,15 @@ def choose_layout_for_family(family: str, requested: str) -> str:
     if requested != "random":
         return requested
     family_bias = {
-        "membership": ["membership", "dense_office"],
-        "university": ["university_table", "admission_marks", "ta_reporting"],
-        "tax": ["tax_grid", "dense_office"],
-        "bank": ["tax_grid", "dense_office", "university_table"],
-        "school": ["admission_marks", "dense_office"],
-        "hospital": ["prescription_sheet", "dense_office", "membership", "university_table"],
-        "prescription": ["prescription_sheet", "dense_office"],
+        "membership": ["membership", "dense_office", "portal_grid", "letter_declaration"],
+        "university": ["university_table", "admission_marks", "ta_reporting", "pre_enrollment", "handwriting_sample", "letter_declaration"],
+        "tax": ["tax_grid", "dense_office", "kyc_grid", "medical_receipt", "letter_declaration"],
+        "bank": ["tax_grid", "dense_office", "university_table", "kyc_grid", "portal_grid", "letter_declaration"],
+        "school": ["admission_marks", "dense_office", "portal_grid", "handwriting_sample", "pre_enrollment"],
+        "hospital": ["prescription_sheet", "dense_office", "membership", "university_table", "medical_receipt", "prehospital_report", "letter_declaration"],
+        "prescription": ["prescription_sheet", "dense_office", "medical_receipt", "prehospital_report"],
+        "insurance": ["dense_office", "letter_declaration", "medical_receipt", "kyc_grid"],
+        "passport": ["portal_grid", "kyc_grid", "dense_office", "letter_declaration"],
     }
     choices = family_bias.get(family, list(LAYOUT_FUNCTIONS.keys()))
     return random.choice(choices)
